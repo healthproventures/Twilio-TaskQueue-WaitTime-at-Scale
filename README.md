@@ -1,54 +1,81 @@
-# Twilio TaskRouter TaskQueue Wait Times
-
-## Using Serverless Node.js and Redis
+# Production-Ready Twilio TaskRouter Wait Times Caching
 
 ## Overview
 
-The purpose of this project is to address the need for a high volume contact center to calculate wait times within the Twilio TaskRouter ecosystem. Due to various limitations within Twilio (API rate limite, Serverless Function timeout limits, API request limits, etc.) we need to move this funcionality out of Twilio and make it faster to retrieve with less chance of a timeout or error.
+This project provides a robust, production-ready solution for calculating and caching wait times for a high-volume Twilio TaskRouter contact center. It addresses common Twilio API limitations (rate limits, timeouts) by offloading wait time calculations to a scheduled process and storing the results in a fast-access Redis data store.
 
-## How
+The system is composed of two core, serverless components:
 
-In this example we will use AWS to set up our enviornment; however, this could technically be built in any combination of services that allow you to run serverless code and build a Redis database. What we'll need in AWS:
+1.  **Cache-Populating Lambda (`cache-queue-times.js`)**: An AWS Lambda function designed to run on a schedule (e.g., every 2 minutes via CloudWatch). It fetches statistics for all TaskQueues from Twilio and caches the average wait times in Redis.
+2.  **Wait-Time Retrieval Function (`get-queue-times.js`)**: A Twilio Serverless Function responsible for retrieving the cached wait time for a *specific* TaskQueue from Redis. This function is designed to be called from a Twilio Studio Flow.
 
-- AWS Lambda to run Node.js code and communcate with the Twilio API.
-- AWS CloudWatch to [schedule running a Lambda function](https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/RunLambdaSchedule.html).
-- AWS Elasticache, specifically Redis, to store TaskRouter TaskQueue wait time data.
+## Key Features & Improvements
 
-### High Level Flow Overview
+*   **Efficient Redis Connection Management**: Uses a single, persistent Redis client across function invocations for improved performance and reliability.
+*   **Robust Error Handling**: Both functions include comprehensive error handling to gracefully manage failures (e.g., failed API calls, missing data) without crashing.
+*   **Asynchronous & Resilient**: The cache-populating function processes each TaskQueue independently, ensuring that a failure to fetch data for one queue does not halt the entire process.
+*   **Test Coverage**: The project includes a full unit test suite using Jest to ensure code reliability and prevent regressions.
+*   **Up-to-date Dependencies**: All dependencies have been updated to their latest stable versions.
 
-#### TaskRouter Wait Time Storage
+## Prerequisites
 
-The [cache-queue-time.js](https://github.com/jmadden/Twilio-TaskQueue-WaitTime-at-Scale/blob/main/cache-queue-times.js) file holds the code to be used in Lambda to run every two minutes to push all TaskQueue wait times in to a Redis data store.
+*   An AWS account with permissions to create Lambda, CloudWatch, and ElastiCache resources.
+*   A Twilio account with TaskRouter configured.
+*   Node.js and npm installed.
 
-1. CloudWatch runs a Lambda function every 2 minutes.
-2. The Lambda function uses the Twilio TaskRouter API to retrieve a list of TaskQueues.
-3. The Lambda function then uses the TaskQueue SIDs to query the builds a JSON object of TaskQueues, their respective wait times, and a timestamp that looks like this:
+## Setup & Deployment
 
-   ```json
-   queues: {
-     WQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: { waittime: 0, timestamp: '2022-01-25T21:49:52.812Z' },
-     WQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: { waittime: 0, timestamp: '2022-01-25T21:49:53.319Z' },
-     WQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: { waittime: 0, timestamp: '2022-01-25T21:49:54.006Z' },
-     WQxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx: { waittime: 0, timestamp: '2022-01-25T21:49:54.661Z' }
-   }
-   ```
+### 1. Configuration
 
-4. The JSON object is console logged so there is a persistent record of the object in AWS Lambda logs.
-5. The JSON object is then converted into a string and saved to the Redis instance in Elasticache.
+Create a `.env` file in the root of the project by copying the `.env.example` file. Populate it with your specific credentials:
 
-#### Wait Time Retrieval
+```bash
+cp .env.example .env
+```
 
-The Wait Time will be retrieved by a Twilio Studio [Make HTTP Request](https://www.twilio.com/docs/studio/widget-library/http-request) widget. The TaskQueue a call is going to be routed to is determined in the Studio Flow during an incoming call. This data will be used to retrieve the TaskQueue wait time.
+**`.env` file contents:**
 
-This code has been written as a [Twilio Serverless function named get-queue-times.js](https://github.com/jmadden/Twilio-TaskQueue-WaitTime-at-Scale/blob/main/queue-wait-time/functions/get-queue-times.js) for easier local development. It should be able to be easily converted into a Lambda function.
+```
+REDIS_HOST=your-redis-host.cache.amazonaws.com
+REDIS_PORT=6379
+REDIS_PASSWORD=your-redis-password # (if applicable)
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token
+TWILIO_WORKSPACE_SID=WSxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+```
 
-1. When the appropriate TaskQueue is determined during a Studio Flow execution, the name of the TaskQueue is passed into a Function widget.
-2. The Function widget uses a Twilio Function to retrieve a static JSON object stored in Assets. The JSON object is a copy of the TaskRouter Workflow config.
-3. The Function finds the TaskQueue SID in the JSON object and passes it back to the Studio Flow.
-4. The Studio Flow then uses the Make HTTP Request widget to make a GET request of the AWS Lambda function that is responsible for retrieving TaskQueue wait time from Redis.
+### 2. Install Dependencies
 
-   - The GET request will have the TaskQueue SID appended to the end of the URL so the proper TaskQueue wait time can be retrieved.
+Install the required Node.js packages:
 
-5. The Lambda function retrieves the `queues` key/value from Redis.
-6. The Lambda function then converts the `queues` value string into a JSON object and retrieves the correct wait time based on the provided TaskQueue SID.
-7. The wait time is then added to the [Enqueue Call widget](https://www.twilio.com/docs/studio/widget-library/enqueue-call) in the Hold Music TwiML URL as a parameter to be used in the hold music logic.
+```bash
+npm install
+```
+
+### 3. Deploying the AWS Lambda Function
+
+1.  **Create a Lambda Function**: In the AWS Console, create a new Node.js Lambda function.
+2.  **Upload Code**: Package the project files (including `node_modules`) into a zip file and upload it to the Lambda function.
+    *   `cache-queue-times.js`
+    *   `utils/RedisUtils.js`
+    *   `.env` (or configure environment variables directly in the Lambda settings)
+    *   `node_modules/` folder
+3.  **Set Handler**: Configure the function's handler to be `cache-queue-times.handler`.
+4.  **Set Environment Variables**: For better security, configure the environment variables from your `.env` file directly in the Lambda function's configuration settings instead of packaging the `.env` file.
+5.  **Schedule with CloudWatch**: Create a CloudWatch Event rule to trigger the Lambda function on a schedule (e.g., `rate(2 minutes)`).
+
+### 4. Deploying the Twilio Function
+
+1.  **Create a Twilio Function Service**: In the Twilio Console, navigate to the Functions section and create a new service.
+2.  **Upload the Function**: Add a new function and upload the code from `queue-wait-time/functions/get-queue-times.js`.
+3.  **Configure Dependencies**: Add the project's dependencies (`redis`, `dotenv`) in the service's dependencies configuration.
+4.  **Set Environment Variables**: Configure the environment variables from your `.env` file in the service's settings.
+5.  **Deploy**: Deploy the function. Note the public URL provided after deployment.
+
+## Running Tests
+
+To run the unit tests, use the following command:
+
+```bash
+npm test
+```
